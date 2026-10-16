@@ -135,6 +135,10 @@ export type RejectCode =
   | 'zip-unreadable'
   | 'zip-too-large'
   | 'payload-too-large'
+  /** Worker 链路特有：请求没带 Content-Length（分块传输），免费档无法预判体积，直接拒 */
+  | 'length-required'
+  /** Worker 链路特有：包体 sha256 锚缺失/形态不对/与实际不符（编辑器声明 + R2 原生校验） */
+  | 'container-digest'
   | 'token-invalid'
   | 'token-expired'
   | 'version-published'

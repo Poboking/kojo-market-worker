@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { unzipSync, zipSync } from 'fflate';
-import { verifyZipPack, indexConflict } from '../src/verify';
+import { indexConflict } from '../src/verify';
 import { packFilesProblem, parseManifest, type PackFileEntry, type PackManifest } from '../src/schema';
 import { sha256Hex } from '../src/token';
-import { goodManifest, packZip, withManifestFor, GOOD_FILES } from './helpers';
+import { goodManifest, packZip, withManifestFor, GOOD_FILES, verifyBytes } from './helpers';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
 describe('golden：合法包通过', () => {
   it('小 zip（pack.json + files/ 几个文本文件）全绿，报告数字与容器摘要全对', async () => {
     const zip = await packZip(await goodManifest());
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.manifest.id).toBe('demo.worker');
@@ -23,7 +23,7 @@ describe('golden：合法包通过', () => {
 
   it('zip 带目录条目 files/（其它打包工具常见）不拒', async () => {
     const zip = await packZip(await goodManifest(), { 'files/': new Uint8Array(0) });
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok).toBe(true);
   });
 });
@@ -31,7 +31,7 @@ describe('golden：合法包通过', () => {
 describe('golden：清单结构逐条被拒', () => {
   const rejects = async (manifestOverrides: Record<string, unknown>, extraEntries?: Record<string, Uint8Array>) => {
     const zip = await packZip(await goodManifest(manifestOverrides), extraEntries);
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok, `期望被拒：${JSON.stringify(manifestOverrides)}`).toBe(false);
     if (r.ok) return '';
     return r.rejected.code;
@@ -42,13 +42,13 @@ describe('golden：清单结构逐条被拒', () => {
   });
   it('pack.json 缺失 -> manifest-missing', async () => {
     const zip = await packZip(await goodManifest());
-    const r = await verifyZipPack(zipSyncWithout(zip, 'pack.json'));
+    const r = await verifyBytes(zipSyncWithout(zip, 'pack.json'));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('manifest-missing');
   });
   it('pack.json 坏 JSON -> manifest-json', async () => {
     const zip = await packZip(await goodManifest());
-    const r = await verifyZipPack(replaceEntry(zip, 'pack.json', enc('{ schema: 1,')));
+    const r = await verifyBytes(replaceEntry(zip, 'pack.json', enc('{ schema: 1,')));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('manifest-json');
   });
@@ -113,14 +113,14 @@ describe('golden：zip 条目卫生（解压前，防穿越零容忍）', () => 
   it('zip 条目 ../ 穿越 -> path-dotdot', async () => {
     const m = await goodManifest();
     const zip = await packZip(m, { 'files/../evil.txt': enc('evil') });
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('path-dotdot');
   });
   it('zip 条目反斜杠 / 绝对路径 / 盘符 各有其码', async () => {
     for (const [name, code] of [['files\\evil.txt', 'path-backslash'], ['/abs.txt', 'path-absolute'], ['C:evil.txt', 'path-drive']] as const) {
       const zip = await packZip(await goodManifest(), { [name]: enc('x') });
-      const r = await verifyZipPack(zip);
+      const r = await verifyBytes(zip);
       expect(r.ok, name).toBe(false);
       if (!r.ok) expect(r.rejected.code, name).toBe(code);
     }
@@ -132,33 +132,34 @@ describe('golden：内容双向对账', () => {
     const zip = await packZip(await withManifestFor({ 'files/hello.txt': GOOD_FILES['files/hello.txt']! }), {
       'files/stowaway.txt': enc('sneak'),
     });
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('entry-extra');
   });
   it('清单声明了 zip 里没有 -> entry-missing', async () => {
     const m = await withManifestFor({ 'files/hello.txt': GOOD_FILES['files/hello.txt']!, 'files/ghost.txt': 'boo\n' });
     const zip = await packZip(m, {}, { 'files/hello.txt': GOOD_FILES['files/hello.txt']! });
-    const r = await verifyZipPack(zip);
+    const r = await verifyBytes(zip);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('entry-missing');
   });
-  it('bytes 与实际不符 -> entry-bytes；sha256 不符 -> entry-sha256（防篡改闸）', async () => {
+  it('bytes 与实际不符 -> entry-bytes；sha256 谎报不再由 Worker 重算（数据级对账推迟注册表 CI）', async () => {
     const base = await withManifestFor(GOOD_FILES);
     const lieBytes = { ...base, files: base.files.map((f) => (f.path === 'files/hello.txt' ? { ...f, bytes: 999 } : f)) };
-    const r1 = await verifyZipPack(await packZip(lieBytes));
+    const r1 = await verifyBytes(await packZip(lieBytes));
     expect(r1.ok).toBe(false);
     if (!r1.ok) expect(r1.rejected.code).toBe('entry-bytes');
 
+    // sha256 谎报：免费档 10ms CPU 线内不做逐文件重算（verify.ts 分层注释）——
+    // Worker 只守形态闸（64 位 hex，parseManifest 内），内容真伪由注册表 CI（merge 后复核）+ 人工审核把守
     const lieSha = { ...base, files: base.files.map((f) => (f.path === 'files/hello.txt' ? { ...f, sha256: 'b'.repeat(64) } : f)) };
-    const r2 = await verifyZipPack(await packZip(lieSha));
-    expect(r2.ok).toBe(false);
-    if (!r2.ok) expect(r2.rejected.code).toBe('entry-sha256');
+    const r2 = await verifyBytes(await packZip(lieSha));
+    expect(r2.ok, JSON.stringify(r2)).toBe(true);
   });
   it('sha256 缺失（undefined 形态）-> entry-sha256', async () => {
     const m = await withManifestFor({ 'files/hello.txt': GOOD_FILES['files/hello.txt']! });
     (m.files[0] as unknown as Record<string, unknown>)['sha256'] = undefined;
-    const r = await verifyZipPack(await packZip(m));
+    const r = await verifyBytes(await packZip(m));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('entry-sha256');
   });
@@ -166,7 +167,7 @@ describe('golden：内容双向对账', () => {
 
 describe('golden：容器层', () => {
   it('不是 zip -> zip-unreadable', async () => {
-    const r = await verifyZipPack(enc('this is not a zip at all........'));
+    const r = await verifyBytes(enc('this is not a zip at all........'));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('zip-unreadable');
   });
@@ -174,7 +175,7 @@ describe('golden：容器层', () => {
     const m = await goodManifest({
       files: [{ path: 'files/huge.bin', bytes: 128 * 1024 * 1024 + 1, sha256: 'a'.repeat(64) }],
     });
-    const r = await verifyZipPack(await packZip(m));
+    const r = await verifyBytes(await packZip(m));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.rejected.code).toBe('bytes-limit');
   });

@@ -35,7 +35,9 @@ export const REJECT_TEXT: Readonly<Record<RejectCode, string>> = {
   /* ---- 容器类 ---- */
   'zip-unreadable': 'zip 解析失败——文件可能损坏或不是标准 zip，请重新导出',
   'zip-too-large': 'zip 本体超过 64 MiB 上限，请压缩内容或拆包',
-  'payload-too-large': '上传体积超过上限（64 MiB），请拆包',
+  'payload-too-large': '上传体积超过上限（99 MB），请拆包后再传',
+  'length-required': '上传必须声明 Content-Length（不支持分块传输）——请更新编辑器后重试',
+  'container-digest': '包体 sha256 校验值缺失、形态不对或与实际内容不符——请更新编辑器后重新导出上传',
   /* ---- 发布链路 ---- */
   'token-invalid': '设备凭证无效——请在编辑器里重新获取发布凭证',
   'token-expired': '设备凭证已过期——请在编辑器里重新获取发布凭证',

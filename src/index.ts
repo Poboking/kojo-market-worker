@@ -1,10 +1,10 @@
 /** Worker 入口：路由 + CORS + R2 待审区落盘 + PR 开具 + webhook/cron 对账。 */
 
-import { MARKET_DEFAULT_INDEX_URL, MARKET_MAX_INDEX_BYTES, MARKET_MAX_ZIP_BYTES, type MarketIndex, type MarketIndexEntry, type PackManifest } from './schema';
+import { MARKET_DEFAULT_INDEX_URL, MARKET_MAX_INDEX_BYTES, SHA256_HEX_RE, type MarketIndex, type MarketIndexEntry, type PackManifest } from './schema';
 import { REJECT_TEXT } from './reject';
 import { issueDeviceToken, verifyDeviceToken } from './token';
 import { verifyZipPack, indexConflict } from './verify';
-import { unzipFileEntries } from './zip';
+import { type ZipWindowReader } from './zip';
 import { publishToRegistry, type FileContents, GithubError } from './github';
 import { extractMergedPublish, indexBytesExceeded, mergeIndexEntry, verifyWebhookSignature } from './webhook';
 
@@ -20,9 +20,18 @@ export interface Env {
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'authorization, content-type',
+  // x-market-zip-sha256：包体 sha256 锚（编辑器本地计算、浏览器预检必须放行）
+  'access-control-allow-headers': 'authorization, content-type, x-market-zip-sha256',
   'access-control-max-age': '86400',
 } as const;
+
+/**
+ * 上传硬上限 = 99_000_000 字节（十进制 99 MB）。CF 免费档请求体边缘上限是
+ * 100,000,000 字节：99MiB≈103,809,024 会被边缘直接 413（Worker 代码根本收不到），
+ * 99_000_000 留 1MB 余量，是免费档能落地的最大「99mb」。
+ * 这与 MARKET_MAX_ZIP_BYTES（64 MiB，注册表 CI 给自己打的 release zip 的口径）无关。
+ */
+const MARKET_MAX_UPLOAD_BYTES = 99_000_000;
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...CORS } });
@@ -62,27 +71,100 @@ async function loadIndex(env: Env): Promise<MarketIndex | null> {
   return null;
 }
 
+/**
+ * 有界体流：R2 put 要求已知长度，请求的 Content-Length 已在闸门确认过。
+ * Workers 运行时用 FixedLengthStream（超收/短读原生报错中止）；测试等非 Workers 环境
+ * 退化为计数变换流——同一语义：实际字节一旦越过声明值立即报错，流式接收中止。
+ */
+function boundedBody(
+  body: ReadableStream<Uint8Array>,
+  declared: number,
+): { readable: ReadableStream<Uint8Array>; done: Promise<void> } {
+  if (typeof FixedLengthStream === 'function') {
+    const fls = new FixedLengthStream(declared);
+    return { readable: fls.readable, done: body.pipeTo(fls.writable) };
+  }
+  let total = 0;
+  const counting = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctrl) {
+      total += chunk.byteLength;
+      if (total > declared) throw new Error(`body exceeds declared content-length (>${declared})`);
+      ctrl.enqueue(chunk);
+    },
+  });
+  return { readable: counting.readable, done: body.pipeTo(counting.writable) };
+}
+
+/** R2 range GET 适配成 zip 字节窗读取器：结构校验只搬窗口字节，不做全量读取 */
+const r2WindowReader = (bucket: R2Bucket, key: string): ZipWindowReader => async (start, end) => {
+  const obj = await bucket.get(key, { range: { offset: start, length: end - start } });
+  if (obj === null) throw new Error(`R2 对象读取失败（暂存可能已消失）: ${key}`);
+  return new Uint8Array(await obj.arrayBuffer());
+};
+
 async function handlePublish(req: Request, env: Env): Promise<Response> {
   const token = bearer(req);
   if (!token) return reject(401, 'token-invalid', '缺 Authorization: Bearer');
   const verdict = await verifyDeviceToken(env.DEVICE_TOKEN_SECRET, token);
   if (verdict !== 'ok') return reject(401, verdict);
 
-  const bytes = new Uint8Array(await req.arrayBuffer());
-  if (bytes.length === 0) return reject(400, 'zip-unreadable', '请求体为空');
-  if (bytes.length > MARKET_MAX_ZIP_BYTES) return reject(413, 'payload-too-large', `${bytes.length} > ${MARKET_MAX_ZIP_BYTES}`);
+  // 容器完整性锚：编辑器本地算好 sha256 放在请求头。Worker 对 99MB 包体不做任何哈希
+  // 循环（免费档 10ms CPU），R2 put 拿它做原生校验——与实际不符直接抛错，零 JS CPU。
+  const digest = req.headers.get('x-market-zip-sha256');
+  if (!digest || !SHA256_HEX_RE.test(digest)) {
+    return reject(400, 'container-digest', '缺 x-market-zip-sha256 头或形态不对');
+  }
 
-  const result = await verifyZipPack(bytes);
+  // 体积闸第一道：Content-Length 必须在——免费档无法预判无声明长度的大包，分块传输直接拒
+  const clHeader = req.headers.get('content-length');
+  if (clHeader === null) return reject(411, 'length-required');
+  const declared = Number(clHeader);
+  if (!Number.isInteger(declared) || declared <= 0) return reject(400, 'zip-unreadable', 'Content-Length 形态不对');
+  if (declared > MARKET_MAX_UPLOAD_BYTES) return reject(413, 'payload-too-large', `${declared} > ${MARKET_MAX_UPLOAD_BYTES}`);
+
+  // 体积闸第二道：流式接收落 R2 暂存（中央目录在包尾，必须先有完整对象才能 range 校验）。
+  // 实际字节越过声明值由 boundedBody 原生中止，不会白吃流量。
+  const body = req.body;
+  if (body === null) return reject(400, 'zip-unreadable', '请求体为空');
+  const stagingKey = `pending/incoming/${crypto.randomUUID()}.zip`;
+  const bounded = boundedBody(body, declared);
+  try {
+    await Promise.all([
+      bounded.done,
+      env.MARKET_BUCKET.put(stagingKey, bounded.readable, {
+        httpMetadata: { contentType: 'application/zip' },
+        sha256: digest, // R2 原生校验：与实际内容不符 → put 抛错
+      }),
+    ]);
+  } catch (e) {
+    console.error(`[r2] 暂存失败 key=${stagingKey}`, e);
+    const msg = e instanceof Error ? e.message : String(e);
+    // 错误文案来自运行时，尽力区分：校验值不符 / 收发不符 / 其它 IO
+    if (/checksum|sha256/i.test(msg)) return reject(400, 'container-digest', '声明的 sha256 与实际包体不符');
+    if (/fixed.?length|content.?length|exceed/i.test(msg)) {
+      return reject(413, 'payload-too-large', '实际接收与声明的 Content-Length 不符');
+    }
+    return reject(502, 'r2-failed');
+  }
+
+  // 结构级两段校验：R2 range GET 只搬窗口字节（中央目录 ≤8MB + pack.json ≤2MB），
+  // 不解压内容文件、不重算 sha256——数据级对账推迟到注册表 CI（merge 后复核）+ 人工审核
+  const result = await verifyZipPack(r2WindowReader(env.MARKET_BUCKET, stagingKey), declared, digest);
   if (!result.ok) {
+    await env.MARKET_BUCKET.delete(stagingKey);
     return reject(400, result.rejected.code, result.rejected.detail, result.rejected.code);
   }
   const { manifest, report } = result;
 
   // 注册表对账（R2 索引缺席时降级跳过——CI merge 前还有一道 validate）
   const conflict = indexConflict(await loadIndex(env), manifest);
-  if (conflict) return reject(409, conflict.code, conflict.detail, conflict.code);
+  if (conflict) {
+    await env.MARKET_BUCKET.delete(stagingKey);
+    return reject(409, conflict.code, conflict.detail, conflict.code);
+  }
 
-  // 校验通过 → R2 待审区（zip + 元数据各一份）；先落盘再开 PR：webhook 归档要靠待审区有货
+  // 暂存 → 待审区正名（R2 无 rename：get 流 → put 流，字节不经 JS 手）；
+  // 先落盘再开 PR：webhook 归档要靠待审区有货
   const key = `pending/${manifest.id}-${manifest.version}-${Date.now()}`;
   const meta = {
     manifest,
@@ -105,19 +187,22 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
     submittedAt: new Date().toISOString(),
   };
   try {
-    await env.MARKET_BUCKET.put(`${key}.zip`, bytes, { httpMetadata: { contentType: 'application/zip' } });
+    const staged = await env.MARKET_BUCKET.get(stagingKey);
+    if (staged === null) throw new Error(`暂存对象丢失 ${stagingKey}`);
+    await env.MARKET_BUCKET.put(`${key}.zip`, staged.body, { httpMetadata: { contentType: 'application/zip' } });
     await env.MARKET_BUCKET.put(`${key}.json`, JSON.stringify(meta, null, 2), { httpMetadata: { contentType: 'application/json' } });
+    await env.MARKET_BUCKET.delete(stagingKey);
   } catch (e) {
-    console.error(`[r2] 写待审区失败 key=${key}`, e);
+    console.error(`[r2] 待审区落盘失败 key=${key}`, e);
     return reject(502, 'r2-failed');
   }
 
-  // GitHub PR：包内容以明文树形态进注册表仓（跟随现状，zip 资产由 CI 打 release），PR 由维护者网页 merge 放行
+  // GitHub PR：免费档 10ms CPU 不允许解压内容文件——PR 先带 pack.json + 校验报告
+  // （含全量逐文件 sha256 声明表）供维护者审；明文树的内容补全（files/** 落库 +
+  // 逐文件 sha256 对账）由注册表仓 CI 从 R2 待审 zip 复核完成。merge=放行不变。
   const repoPath = `packs/${manifest.kind}/${manifest.id}/${manifest.version}`;
-  const entries = unzipFileEntries(bytes);
   const contents: FileContents = {
     [`${repoPath}/pack.json`]: new TextEncoder().encode(JSON.stringify(manifest, null, 2) + '\n'),
-    ...Object.fromEntries(report.files.map((f) => [`${repoPath}/${f.path}`, entries[f.path]!] as const)),
   };
 
   try {

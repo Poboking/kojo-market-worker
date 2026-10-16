@@ -1,6 +1,8 @@
 import { zipSync, type Zippable } from 'fflate';
 import { sha256Hex } from '../src/token';
 import type { PackManifest } from '../src/schema';
+import { type ZipWindowReader } from '../src/zip';
+import { verifyZipPack, type VerifyResult } from '../src/verify';
 
 /** 合法样例的文件内容（小文本） */
 export const GOOD_FILES: Record<string, string> = {
@@ -45,3 +47,12 @@ export async function withManifestFor(files: Record<string, string>, overrides: 
   );
   return goodManifest({ ...overrides, files: entries });
 }
+
+/* ---- 免费档两段式校验的测试适配（生产侧读取器是 R2 range GET，见 index.ts） ---- */
+
+/** 内存字节窗读取器：把 verifyZipPack 适配成「本地 zip」形态 */
+export const bufferReader = (zip: Uint8Array): ZipWindowReader => async (start, end) => zip.subarray(start, end);
+
+/** 与编辑器同口径：容器 sha256 由编辑器本地算好随上传声明（Worker 不重算，只做锚） */
+export const verifyBytes = async (zip: Uint8Array, digest?: string): Promise<VerifyResult> =>
+  verifyZipPack(bufferReader(zip), zip.length, digest ?? (await sha256Hex(zip)));
