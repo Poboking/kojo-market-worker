@@ -1,0 +1,8 @@
+# 单包仓；pnpm 11 的设置住这里（package.json 的 pnpm 字段已废弃）
+# allowBuilds 项目级覆盖：全局 ~/.npmrc 里这两个包留了无效占位符，会硬报 ERR_PNPM_IGNORED_BUILDS
+allowBuilds:
+  esbuild: true
+  workerd: true
+onlyBuiltDependencies:
+  - esbuild
+  - workerd

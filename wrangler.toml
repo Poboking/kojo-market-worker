@@ -1,0 +1,20 @@
+name = "kojo-market-worker"
+main = "src/index.ts"
+compatibility_date = "2025-09-23"
+
+# 编辑器发布链入口：POST /device-token -> POST /publish（zip） -> R2 待审区 -> GitHub PR
+# 自定义域（market.3625735381.xyz）在 dashboard 绑定，这里不硬编码。
+# secrets（不写在 toml 里）：
+#   wrangler secret put GITHUB_TOKEN         # 对 kojo-market 仓有 contents:write + pull_requests:write 的 fine-grained PAT
+#   wrangler secret put DEVICE_TOKEN_SECRET  # 设备 token 的 HMAC 密钥（>=32 字节随机串）
+#   wrangler secret put WEBHOOK_SECRET       # 可选；不配则 POST /hook/pr-merged 返回 503（走 cron 兜底）
+[vars]
+GITHUB_REPO = "Poboking/kojo-market"
+
+[[r2_buckets]]
+binding = "MARKET_BUCKET"
+bucket_name = "kojo-market"
+
+# 兜底对账：gh-pages 权威 index.json 定期镜像进 R2（webhook 晚到/丢失时自愈，GET /index.json 双源回退的分发面）
+[triggers]
+crons = ["17 */6 * * *"]
