@@ -56,7 +56,7 @@ pnpm wrangler secret put DEVICE_TOKEN_SECRET   # ≥32 字节随机串（openssl
 pnpm wrangler secret put WEBHOOK_SECRET        # 可选；不配则 /hook/pr-merged 返回 503
 ```
 
-3. **Custom Domain**：dashboard 里给 Worker 绑 `market.3625735381.xyz`（代码/wrangler.toml 不硬编码域）。
+3. **Custom Domain**：dashboard 里给 Worker 绑 `market.362573581.xyz`（代码/wrangler.toml 不硬编码域）。
 4. **Webhook（可选，走实时归档）**：注册表仓 Settings → Webhooks：
    - URL `https://<你的域>/hook/pr-merged`，Content type `application/json`，secret 与 `WEBHOOK_SECRET` 一致；
    - 事件只勾 **Pull requests**。
@@ -66,16 +66,16 @@ pnpm wrangler secret put WEBHOOK_SECRET        # 可选；不配则 /hook/pr-mer
 
 ```bash
 # 0. 健康
-curl -s https://market.3625735381.xyz/health
+curl -s https://market.362573581.xyz/health
 # => {"ok":true}
 
 # 1. 领设备 token
-TOKEN=$(curl -s -X POST https://market.3625735381.xyz/device-token | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
+TOKEN=$(curl -s -X POST https://market.362573581.xyz/device-token | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
 
 # 2. 上传样例 zip（zip 根 = pack.json + files/**；可先用注册表 CI 的 market.mjs 从明文树打一个）
 #    x-market-zip-sha256 = 包体 sha256（编辑器上传时同样本地计算随头声明）
 ZIP_SHA=$(sha256sum demo.worker-1.0.0.zip | cut -d' ' -f1)
-curl -s -X POST https://market.3625735381.xyz/publish \
+curl -s -X POST https://market.362573581.xyz/publish \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/zip" \
   -H "x-market-zip-sha256: $ZIP_SHA" \
@@ -86,7 +86,7 @@ curl -s -X POST https://market.3625735381.xyz/publish \
 pnpm wrangler r2 object get "kojo-market/pending/demo.worker-1.0.0-<ts>.json"
 
 # 4. 索引分发面（merge 后 webhook/cron 镜像进 R2；miss 时回源 gh-pages）
-curl -s https://market.3625735381.xyz/index.json
+curl -s https://market.362573581.xyz/index.json
 ```
 
 拒绝样例：把包里混进 `../` 或把 `schema` 改成 2 再传，会得到
