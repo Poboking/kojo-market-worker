@@ -1,5 +1,5 @@
 /**
- * /publish 处理器级测试：免费档上传链的闸门（凭证 / Content-Length / 99MB / 摘要锚）
+ * /publish 处理器级测试：免费档上传链的闸门（凭证 / Content-Length / 95MB / 摘要锚）
  * 与全链路 happy path（暂存 → 结构校验 → 待审区 → PR）。
  * R2 用内存假桶（支持 range 窗口），GitHub/gh-pages 出网全部打桩——零真网依赖。
  */
@@ -168,7 +168,7 @@ describe('/publish 处理器级（免费档上传链）', () => {
     expect(bucket.store.size).toBe(0);
   });
 
-  it('Content-Length 超 99_000_000 -> 413 payload-too-large（本地闸先行拒因，不收包）', async () => {
+  it('Content-Length 超 95_000_000 -> 413 payload-too-large（本地闸先行拒因，不收包）', async () => {
     const { env, bucket } = makeEnv();
     const token = await getToken(env);
     const zip = await packZip(await goodManifest());
@@ -178,7 +178,7 @@ describe('/publish 处理器级（免费档上传链）', () => {
           authorization: `Bearer ${token}`,
           'content-type': 'application/zip',
           'x-market-zip-sha256': await sha256Hex(zip),
-          'content-length': '99000001',
+          'content-length': '95000001',
         },
         zip,
       ),

@@ -26,12 +26,12 @@ const CORS = {
 } as const;
 
 /**
- * 上传硬上限 = 99_000_000 字节（十进制 99 MB）。CF 免费档请求体边缘上限是
+ * 上传硬上限 = 95_000_000 字节（十进制 95 MB）。CF 免费档请求体边缘上限是
  * 100,000,000 字节：99MiB≈103,809,024 会被边缘直接 413（Worker 代码根本收不到），
- * 99_000_000 留 1MB 余量，是免费档能落地的最大「99mb」。
+ * 95_000_000 留 5MB 余量——余量越大，边缘 413 与本地拒因之间的空窗越窄。
  * 这与 MARKET_MAX_ZIP_BYTES（64 MiB，注册表 CI 给自己打的 release zip 的口径）无关。
  */
-const MARKET_MAX_UPLOAD_BYTES = 99_000_000;
+const MARKET_MAX_UPLOAD_BYTES = 95_000_000;
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...CORS } });
@@ -108,7 +108,7 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
   const verdict = await verifyDeviceToken(env.DEVICE_TOKEN_SECRET, token);
   if (verdict !== 'ok') return reject(401, verdict);
 
-  // 容器完整性锚：编辑器本地算好 sha256 放在请求头。Worker 对 99MB 包体不做任何哈希
+  // 容器完整性锚：编辑器本地算好 sha256 放在请求头。Worker 对 95MB 包体不做任何哈希
   // 循环（免费档 10ms CPU），R2 put 拿它做原生校验——与实际不符直接抛错，零 JS CPU。
   const digest = req.headers.get('x-market-zip-sha256');
   if (!digest || !SHA256_HEX_RE.test(digest)) {

@@ -1,7 +1,7 @@
 /**
  * 发布校验主流程（免费档结构级）：zip 字节窗 → 结构化结果（校验报告 | 拒绝）。
  *
- * 判据链 = 容器体积闸（请求侧 Content-Length，99MB，见 index.ts）
+ * 判据链 = 容器体积闸（请求侧 Content-Length，95MB，见 index.ts）
  *        → 中央目录预扫（解压前：条数/路径卫生/重复/解压总量，见 zip.ts）
  *        → 清单结构（pack.json 局部解出后 parseManifest）
  *        → 清单 ↔ 中央目录 双向对账（path/bytes）。
