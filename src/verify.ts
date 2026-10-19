@@ -36,7 +36,7 @@ export interface VerifyReport {
 }
 
 export type VerifyResult =
-  | { ok: true; manifest: PackManifest; report: VerifyReport }
+  | { ok: true; manifest: PackManifest; manifestBytes: Uint8Array; report: VerifyReport }
   | { ok: false; rejected: Rejected };
 
 const rejected = (code: Rejected['code'], detail?: string): { ok: false; rejected: Rejected } => ({
@@ -87,6 +87,8 @@ export async function verifyZipPack(
   return {
     ok: true,
     manifest,
+    // zip 内 pack.json 的原始字节：PR 树原样提交，注册表 hydrate 的字节级对账才成立
+    manifestBytes: raw.data,
     report: {
       fileCount: verified.length,
       unpackedBytes: verified.reduce((n, f) => n + f.bytes, 0),

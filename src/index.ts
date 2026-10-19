@@ -154,7 +154,7 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
     await env.MARKET_BUCKET.delete(stagingKey);
     return reject(400, result.rejected.code, result.rejected.detail, result.rejected.code);
   }
-  const { manifest, report } = result;
+  const { manifest, manifestBytes, report } = result;
 
   // 注册表对账（R2 索引缺席时降级跳过——CI merge 前还有一道 validate）
   const conflict = indexConflict(await loadIndex(env), manifest);
@@ -200,9 +200,11 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
   // GitHub PR：免费档 10ms CPU 不允许解压内容文件——PR 先带 pack.json + 校验报告
   // （含全量逐文件 sha256 声明表）供维护者审；明文树的内容补全（files/** 落库 +
   // 逐文件 sha256 对账）由注册表仓 CI 从 R2 待审 zip 复核完成。merge=放行不变。
+  // pack.json 必须提交 zip 内原始字节（不重序列化）：注册表 hydrate 先做字节级对账，
+  // 只有格式化差异时才回退语义比较；原样提交能让两道闸都走最快的路径。
   const repoPath = `packs/${manifest.kind}/${manifest.id}/${manifest.version}`;
   const contents: FileContents = {
-    [`${repoPath}/pack.json`]: new TextEncoder().encode(JSON.stringify(manifest, null, 2) + '\n'),
+    [`${repoPath}/pack.json`]: manifestBytes,
   };
 
   try {

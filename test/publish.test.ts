@@ -4,12 +4,14 @@
  * R2 用内存假桶（支持 range 窗口），GitHub/gh-pages 出网全部打桩——零真网依赖。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { unzipSync } from 'fflate';
 import worker, { type Env } from '../src/index';
 import { goodManifest, packZip, withManifestFor, GOOD_FILES } from './helpers';
 import { sha256Hex } from '../src/token';
 import { MARKET_DEFAULT_INDEX_URL } from '../src/schema';
 
 const enc = (s: string) => new TextEncoder().encode(s);
+const b64ToBytes = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 /** 内存 R2 假桶：put 收流、get 支持 range 窗口（结构校验只走窗口字节的关键依赖） */
 function fakeBucket() {
@@ -241,7 +243,12 @@ describe('/publish 处理器级（免费档上传链）', () => {
     const treeCall = calls.find((c) => c.url.includes('/git/trees'));
     const paths = (treeCall!.body as { tree: { path: string }[] }).tree.map((t) => t.path).sort();
     expect(paths).toEqual(['packs/kojo-pack/demo.worker/1.0.0/pack.json']);
-    expect(calls.filter((c) => c.url.includes('/git/blobs')).length).toBe(1);
+    const blobCalls = calls.filter((c) => c.url.includes('/git/blobs'));
+    expect(blobCalls.length).toBe(1);
+    // 字节级判据：PR 树里的 pack.json 必须与上传 zip 内的原始字节全等（不重序列化）
+    const blob = blobCalls[0]!.body as { content: string; encoding: string };
+    expect(blob.encoding).toBe('base64');
+    expect([...b64ToBytes(blob.content)]).toEqual([...unzipSync(zip)['pack.json']!]);
   });
 
   it('中央目录穿越（zip 条目 ../）-> 400 path-dotdot，暂存清理', async () => {
